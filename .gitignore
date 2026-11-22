@@ -9,6 +9,7 @@ build/
 dist/
 # experiment artifacts (regenerable, large)
 data/
+!demo/data/
 cache/
 runs/
 outputs/

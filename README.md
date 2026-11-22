@@ -24,6 +24,12 @@ Each version adds one capability, ships on its own, and supports one claim.
 
 Each version has a folder in [`experiments/`](experiments/) with its hypothesis, plan and results.
 
+## Demo
+
+[`demo/`](demo/) is a chat-style demo on real test questions (Wikipedia, science papers, nutrition research). Each reply shows the answer, how much context Calibre sent compared with a fixed top-5, and the passages it used.
+
+Open `demo/index.html` in a browser to run it locally. It's a static site, so it deploys on Vercel with the root directory set to `demo` (see [`demo/README.md`](demo/README.md)).
+
 ## Quickstart (v0)
 
 ### 1. Install (Windows PowerShell)
@@ -98,6 +104,7 @@ calibre_rag/
   eval/          # nDCG@k, recall@k, selection recall
 examples/
   try_calibre.py # quick v0 demo
+demo/            # chat-style web demo (static site)
 docs/figures/     # pilot figures used in this README
 experiments/
   v0_baseline/  v1_calibrated/  v2_guaranteed/  v3_portable/  v4_agentic/

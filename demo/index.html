@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Calibre</title>
+  <meta name="description" content="Ask a question and see how much retrieved context Calibre sends compared with a fixed top-5.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="bar">
+    <span class="wordmark">Calibre</span>
+    <a class="gh" id="gh" href="#" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7 3 12l5 5M16 7l5 5-5 5M14 4l-4 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      GitHub
+    </a>
+  </header>
+
+  <main class="chat">
+    <nav class="kbs" id="kbs" aria-label="Knowledge base"></nav>
+    <ol class="thread" id="thread" aria-live="polite"></ol>
+  </main>
+
+  <form class="composer" id="composer" autocomplete="off">
+    <div class="composer-inner">
+      <ul class="matches" id="matches" role="listbox" hidden></ul>
+      <label class="visually-hidden" for="ask">Your question</label>
+      <input id="ask" type="text" role="combobox" aria-autocomplete="list" aria-controls="matches" aria-expanded="false">
+      <button type="submit" id="send">Ask</button>
+    </div>
+    <p class="fine" id="fine"></p>
+  </form>
+
+  <script src="data/demo_data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

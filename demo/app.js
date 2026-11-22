@@ -1,0 +1,236 @@
+/* Calibre chat demo.
+ * Retrieval results are precomputed with calibre_rag v0 (see scripts/export_from_pilot.py):
+ * for every test question we know the ranked passages, how many a fixed top-5 sends,
+ * how many Calibre sends, and which passages the dataset labels as relevant.
+ */
+const DATA = window.CALIBRE_DEMO;
+const REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = n => Math.round(n).toLocaleString("en-US");
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+const state = { kb: null, thread: [], matchIdx: -1, matches: [] };
+const kb = () => DATA.kbs.find(k => k.id === state.kb);
+
+/* ---------- matching typed text to test questions ---------- */
+const STOP = new Set("a an the of in on at to for and or is are was were be by with what who whom which when where why how did does do from as that this it its into than".split(" "));
+const words = s => s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w && !STOP.has(w));
+function score(query, text) {
+  const q = new Set(words(query)), t = new Set(words(text));
+  if (!q.size || !t.size) return 0;
+  let hit = 0; for (const w of q) if (t.has(w)) hit++;
+  return hit / Math.sqrt(q.size * t.size);
+}
+function search(query, n = 6) {
+  if (!query.trim()) return [];
+  return kb().bank.map((it, i) => ({ i, s: score(query, it.q) })).filter(x => x.s > 0)
+    .sort((a, b) => b.s - a.s).slice(0, n);
+}
+
+/* ---------- answer lookup (SQuAD) ---------- */
+function findAnswer(item) {
+  if (!item.answers) return null;
+  const k = kb();
+  for (let p = 0; p < item.docs.length; p++) {
+    const text = (k.passages[item.docs[p]].x || "").toLowerCase();
+    for (const a of item.answers) if (a && text.includes(a.toLowerCase())) return { pos: p, text: a };
+  }
+  return { pos: -1, text: item.answers[0] || "" };
+}
+
+function highlight(text, answer) {
+  if (!answer) return esc(text);
+  const i = text.toLowerCase().indexOf(answer.toLowerCase());
+  if (i < 0) return esc(text);
+  return esc(text.slice(0, i)) + "<mark>" + esc(text.slice(i, i + answer.length)) + "</mark>" + esc(text.slice(i + answer.length));
+}
+
+/* ---------- rendering ---------- */
+function renderKbs() {
+  $("kbs").innerHTML = DATA.kbs.map(k =>
+    `<button type="button" data-kb="${k.id}" aria-pressed="${k.id === state.kb}">${esc(k.name)}</button>`).join("");
+  $("kbs").querySelectorAll("button").forEach(b => b.addEventListener("click", () => switchKb(b.dataset.kb)));
+}
+
+function chipsHtml(indices) {
+  return `<div class="chips">${indices.map(i =>
+    `<button type="button" class="chip" data-ask="${i}">${esc(kb().bank[i].q)}</button>`).join("")}</div>`;
+}
+
+function pickSuggestions(n, exclude = new Set()) {
+  const pool = kb().suggested.filter(i => !exclude.has(i));
+  const shuffled = pool.slice().sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, n);
+}
+
+function sourceCard(item, docId, rank, answer, extra) {
+  const p = kb().passages[docId];
+  const isRel = item.rel[docId] > 0;
+  const hasAnswer = answer && p.x.toLowerCase().includes(answer.toLowerCase());
+  const tag = extra ? `<span class="src-rank">Top-5 only, rank ${rank}</span>` : `<span class="src-rank">Rank ${rank}</span>`;
+  return `<div class="src ${isRel ? "rel" : ""} ${extra ? "extra" : ""} ${hasAnswer ? "open" : ""}">
+    <div class="src-head"><span class="src-title">${esc(p.t || "Passage")}</span>${tag}</div>
+    <button type="button" class="src-expand" aria-expanded="${hasAnswer}" aria-label="Show or hide the full passage">
+      <p class="src-text">${highlight(p.x, answer)}</p></button>
+    ${isRel ? `<div class="src-foot"><span class="pill rel">${item.rel[docId] >= 2 ? "Highly relevant" : "Relevant"}</span></div>` : ""}
+  </div>`;
+}
+
+function replyHtml(msg) {
+  const k = kb(), item = k.bank[msg.item];
+  const kCal = item.k_cal, kTop = item.k_top;
+  const relCal = item.docs.slice(0, kCal).filter(d => item.rel[d] > 0).length;
+  const relTop = item.docs.slice(0, kTop).filter(d => item.rel[d] > 0).length;
+  let head = "", answerText = null;
+
+  if (item.answers) {
+    const a = findAnswer(item);
+    answerText = a.pos >= 0 ? a.text : null;
+    if (a.pos >= 0 && a.pos < kCal) {
+      head = `<p class="answer"><strong>${esc(a.text)}</strong></p><p class="answer-note">Found in ${kCal === 1 ? "the only passage" : `passage ${a.pos + 1} of the ${kCal}`} Calibre sent.</p>`;
+    } else if (a.pos >= 0 && a.pos < kTop) {
+      head = `<p class="answer"><strong>${esc(a.text)}</strong></p><p class="answer-note bad">Calibre missed this one: the answer was in passage ${a.pos + 1}, which only top-5 sent.</p>`;
+    } else {
+      head = `<p class="answer">No answer in the retrieved passages.</p><p class="answer-note bad">Search didn't surface the right paragraph, so neither top-5 nor Calibre has it.</p>`;
+    }
+  } else if (item.rel_top20 === 0) {
+    head = `<p class="answer">No relevant passage was found.</p><p class="answer-note bad">Search didn't surface any passage labelled relevant, so neither top-5 nor Calibre has one.</p>`;
+  } else {
+    head = `<p class="answer"><strong>${plural(relCal, "relevant passage")}</strong> in Calibre's context</p>
+      <p class="answer-note ${relCal < relTop ? "bad" : ""}">Top-5 included ${relTop}${relCal < relTop ? ", so Calibre dropped one here" : ""}.</p>`;
+  }
+
+  const max = Math.max(item.tok_cal, item.tok_top, 1);
+  const diff = item.tok_top ? (item.tok_cal - item.tok_top) / item.tok_top * 100 : 0;
+  let saving;
+  if (Math.abs(diff) < 0.5) saving = `<span class="saving">Same context as top-5</span>`;
+  else if (diff < 0) saving = `<span class="saving">${Math.round(-diff)}% less context than top-5</span>`;
+  else saving = `<span class="saving ${relCal > relTop ? "" : "worse"}">${Math.round(diff)}% more context than top-5${relCal > relTop ? ", keeping more relevant passages" : ""}</span>`;
+
+  const meter = `<div class="meter">
+      <div class="meter-row cal"><span class="who">Calibre</span><span class="track"><span class="fill" data-w="${(item.tok_cal / max * 100).toFixed(1)}"></span></span><span class="what">${plural(kCal, "passage")}, ${fmt(item.tok_cal)} tokens</span></div>
+      <div class="meter-row top"><span class="who">Top-5</span><span class="track"><span class="fill" data-w="${(item.tok_top / max * 100).toFixed(1)}"></span></span><span class="what">${plural(kTop, "passage")}, ${fmt(item.tok_top)} tokens</span></div>
+    </div>${saving}`;
+
+  const sent = item.docs.slice(0, kCal).map((d, i) => sourceCard(item, d, i + 1, answerText, false)).join("");
+  const extras = item.docs.slice(kCal, kTop);
+  const extraHtml = extras.length ? `
+      <button type="button" class="linkish toggle-extra" aria-expanded="${msg.open}">${msg.open ? "Hide" : "Show"} the ${plural(extras.length, "passage")} only top-5 sends</button>
+      ${msg.open ? `<div class="extra-wrap">${extras.map((d, j) => sourceCard(item, d, kCal + j + 1, answerText, true)).join("")}</div>` : ""}` : "";
+
+  const matched = msg.typed && msg.typed.trim().toLowerCase() !== item.q.toLowerCase()
+    ? `<p class="matched">Closest question in the test set: “${esc(item.q)}”</p>` : "";
+
+  return `<div class="reply">${matched}${head}${meter}<div class="sources">${sent}</div>${extraHtml}</div>`;
+}
+
+function render() {
+  const k = kb();
+  $("ask").placeholder = k.placeholder;
+  $("fine").textContent = `Questions from the ${k.source} test set, with precomputed BM25 + embedding search. Answers come from the dataset's labels; no LLM is called.`;
+  const html = state.thread.map((m, idx) => {
+    if (m.role === "welcome") {
+      return `<li class="welcome"><h1>Ask a question</h1><p>Calibre sends the LLM only the passages a question needs.</p>${chipsHtml(m.chips)}</li>`;
+    }
+    if (m.role === "user") return `<li class="msg-user">${esc(m.text)}</li>`;
+    if (m.role === "thinking") return `<li class="msg-bot"><div class="reply thinking">Searching<span></span><span></span><span></span></div></li>`;
+    if (m.role === "nomatch") {
+      return `<li class="msg-bot"><div class="reply"><p class="answer">That question isn't in the ${esc(k.source)} test set.</p>
+        <p class="answer-note">This demo only answers questions it has labels for. ${m.close ? "Closest questions it has:" : "Try one of these:"}</p>
+        <div style="margin-top:10px">${chipsHtml(m.chips)}</div></div></li>`;
+    }
+    const last = idx === state.thread.length - 1;
+    return `<li class="msg-bot" data-msg="${idx}">${replyHtml(m)}${last ? `<p class="chips-label">Try another</p>${chipsHtml(m.chips)}` : ""}</li>`;
+  }).join("");
+  $("thread").innerHTML = html;
+
+  $("thread").querySelectorAll("[data-ask]").forEach(b => b.addEventListener("click", () => ask(Number(b.dataset.ask))));
+  $("thread").querySelectorAll(".toggle-extra").forEach(b => b.addEventListener("click", () => {
+    const m = state.thread[Number(b.closest("[data-msg]").dataset.msg)]; m.open = !m.open; m.animated = true; render();
+  }));
+  $("thread").querySelectorAll(".src-expand").forEach(b => b.addEventListener("click", () => {
+    const card = b.closest(".src"); const open = card.classList.toggle("open"); b.setAttribute("aria-expanded", open);
+  }));
+  // animate the context meters of new replies once
+  $("thread").querySelectorAll("[data-msg]").forEach(li => {
+    const m = state.thread[Number(li.dataset.msg)];
+    const fills = li.querySelectorAll(".fill");
+    if (m.animated || REDUCED) { fills.forEach(f => (f.style.width = f.dataset.w + "%")); return; }
+    m.animated = true;
+    requestAnimationFrame(() => requestAnimationFrame(() => fills.forEach(f => (f.style.width = f.dataset.w + "%"))));
+  });
+}
+
+function scrollToEnd() {
+  const last = $("thread").lastElementChild;
+  if (last) last.scrollIntoView({ behavior: REDUCED ? "auto" : "smooth", block: "start" });
+}
+
+function ask(itemIdx, typed) {
+  const item = kb().bank[itemIdx];
+  state.thread = state.thread.filter(m => m.role !== "welcome");
+  state.thread.push({ role: "user", text: typed || item.q });
+  state.thread.push({ role: "thinking" });
+  render(); scrollToEnd();
+  const asked = new Set(state.thread.filter(m => m.item !== undefined).map(m => m.item).concat([itemIdx]));
+  setTimeout(() => {
+    state.thread.pop();
+    state.thread.push({ role: "bot", item: itemIdx, typed, open: false, chips: pickSuggestions(3, asked) });
+    render(); scrollToEnd();
+  }, REDUCED ? 0 : 450);
+}
+
+function askText(text) {
+  const best = search(text, 1)[0];
+  if (best && best.s >= 0.5) return ask(best.i, text);
+  state.thread = state.thread.filter(m => m.role !== "welcome");
+  state.thread.push({ role: "user", text });
+  const close = search(text, 4).filter(x => x.s >= 0.25).map(x => x.i);
+  state.thread.push({ role: "nomatch", close: close.length > 0, chips: close.length ? close : pickSuggestions(4) });
+  render(); scrollToEnd();
+}
+
+function switchKb(id) {
+  state.kb = id;
+  state.thread = [{ role: "welcome", chips: pickSuggestions(6) }];
+  renderKbs(); render(); closeMatches();
+  window.scrollTo({ top: 0 });
+}
+
+/* ---------- composer with suggestions as you type ---------- */
+function closeMatches() { $("matches").hidden = true; $("ask").setAttribute("aria-expanded", "false"); state.matchIdx = -1; state.matches = []; }
+function showMatches() {
+  const list = $("matches");
+  state.matches = search($("ask").value);
+  if (!state.matches.length) return closeMatches();
+  list.innerHTML = state.matches.map((m, j) =>
+    `<li role="option" id="opt-${j}" data-i="${m.i}" aria-selected="${j === state.matchIdx}">${esc(kb().bank[m.i].q)}</li>`).join("");
+  list.hidden = false; $("ask").setAttribute("aria-expanded", "true");
+  list.querySelectorAll("li").forEach(li => li.addEventListener("mousedown", e => {
+    e.preventDefault(); const i = Number(li.dataset.i); $("ask").value = ""; closeMatches(); ask(i);
+  }));
+}
+$("ask").addEventListener("input", () => { state.matchIdx = -1; showMatches(); });
+$("ask").addEventListener("keydown", e => {
+  if ($("matches").hidden) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const n = state.matches.length;
+    state.matchIdx = e.key === "ArrowDown" ? (state.matchIdx + 1) % n : (state.matchIdx - 1 + n) % n;
+    showMatches();
+    $("ask").setAttribute("aria-activedescendant", `opt-${state.matchIdx}`);
+  } else if (e.key === "Escape") closeMatches();
+});
+$("ask").addEventListener("blur", () => setTimeout(closeMatches, 100));
+$("composer").addEventListener("submit", e => {
+  e.preventDefault();
+  const text = $("ask").value.trim();
+  const chosen = state.matchIdx >= 0 ? state.matches[state.matchIdx] : null;
+  $("ask").value = ""; closeMatches();
+  if (chosen) return ask(chosen.i);
+  if (text) askText(text);
+});
+
+$("gh").href = DATA.github;
+switchKb(DATA.kbs[0].id);
