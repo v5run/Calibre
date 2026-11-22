@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+build/
+dist/
+# experiment artifacts (regenerable, large)
+data/
+cache/
+runs/
+outputs/
+wandb/
+*.pkl
+*.npy
+*.npz
+*.faiss
+.env

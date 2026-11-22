@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "calibre-rag"
+version = "0.1.0.dev0"
+description = "Calibrated hybrid retrieval that knows how much context is enough."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Varun" }]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+calibrated = ["scikit-learn>=1.3"]
+experiments = ["sentence-transformers", "faiss-cpu", "datasets", "hydra-core", "wandb", "matplotlib"]
+
+[tool.setuptools.packages.find]
+include = ["calibre_rag*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
