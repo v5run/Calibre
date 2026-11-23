@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Calibre</title>
-  <meta name="description" content="Ask a question and see how much retrieved context Calibre sends compared with a fixed top-5.">
+  <meta name="description" content="Ask a question and see how much retrieved context Calibre sends for a recall target, compared with a fixed top-5.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -20,7 +20,13 @@
   </header>
 
   <main class="chat">
-    <nav class="kbs" id="kbs" aria-label="Knowledge base"></nav>
+    <div class="controls">
+      <nav class="kbs" id="kbs" aria-label="Knowledge base"></nav>
+      <div class="target" role="group" aria-labelledby="target-label">
+        <span id="target-label">Recall target</span>
+        <div class="seg" id="targets"></div>
+      </div>
+    </div>
     <ol class="thread" id="thread" aria-live="polite"></ol>
   </main>
 

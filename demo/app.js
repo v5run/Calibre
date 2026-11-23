@@ -1,7 +1,8 @@
 /* Calibre chat demo.
- * Retrieval results are precomputed with calibre_rag v0 (see scripts/export_from_pilot.py):
- * for every test question we know the ranked passages, how many a fixed top-5 sends,
- * how many Calibre sends, and which passages the dataset labels as relevant.
+ * Retrieval results are precomputed with calibre_rag v1 + v2 (see scripts/export_from_pilot.py):
+ * for every test question we know the ranked passages with P(relevant), how many passages
+ * Calibre sends for each recall target, how many a fixed top-5 sends, token counts, and
+ * which passages the dataset labels as relevant.
  */
 const DATA = window.CALIBRE_DEMO;
 const REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -10,8 +11,11 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;",
 const fmt = n => Math.round(n).toLocaleString("en-US");
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
-const state = { kb: null, thread: [], matchIdx: -1, matches: [] };
+const state = { kb: null, target: DATA.default_target, thread: [], matchIdx: -1, matches: [] };
 const kb = () => DATA.kbs.find(k => k.id === state.kb);
+const tokens = (item, n) => item.tk.slice(0, n).reduce((a, b) => a + b, 0);
+const pct = p => (p < 0.01 ? "<1%" : `${Math.round(p * 100)}%`);
+const SHOW_FIRST = 4;   // passages shown before "show more"
 
 /* ---------- matching typed text to test questions ---------- */
 const STOP = new Set("a an the of in on at to for and or is are was were be by with what who whom which when where why how did does do from as that this it its into than".split(" "));
@@ -53,6 +57,21 @@ function renderKbs() {
   $("kbs").querySelectorAll("button").forEach(b => b.addEventListener("click", () => switchKb(b.dataset.kb)));
 }
 
+function renderTargets() {
+  $("targets").innerHTML = DATA.targets.map(t =>
+    `<button type="button" data-t="${t}" aria-pressed="${t === state.target}">${t}%</button>`).join("");
+  $("targets").querySelectorAll("button").forEach(b => b.addEventListener("click", () => setTarget(b.dataset.t)));
+}
+
+function setTarget(t) {
+  if (t === state.target) return;
+  state.target = t;
+  // replay the meter on the latest reply so the change in context is visible
+  const lastBot = [...state.thread].reverse().find(m => m.role === "bot");
+  if (lastBot) lastBot.animated = false;
+  renderTargets(); render();
+}
+
 function chipsHtml(indices) {
   return `<div class="chips">${indices.map(i =>
     `<button type="button" class="chip" data-ask="${i}">${esc(kb().bank[i].q)}</button>`).join("")}</div>`;
@@ -66,20 +85,25 @@ function pickSuggestions(n, exclude = new Set()) {
 
 function sourceCard(item, docId, rank, answer, extra) {
   const p = kb().passages[docId];
+  const prob = item.p[rank - 1];
   const isRel = item.rel[docId] > 0;
   const hasAnswer = answer && p.x.toLowerCase().includes(answer.toLowerCase());
-  const tag = extra ? `<span class="src-rank">Top-5 only, rank ${rank}</span>` : `<span class="src-rank">Rank ${rank}</span>`;
+  const tag = extra ? `Top-5 only, rank ${rank}` : rank > item.k_top ? `Rank ${rank}, beyond top-5` : `Rank ${rank}`;
   return `<div class="src ${isRel ? "rel" : ""} ${extra ? "extra" : ""} ${hasAnswer ? "open" : ""}">
-    <div class="src-head"><span class="src-title">${esc(p.t || "Passage")}</span>${tag}</div>
+    <div class="src-head"><span class="src-title">${esc(p.t || "Passage")}</span><span class="src-rank">${tag}</span></div>
     <button type="button" class="src-expand" aria-expanded="${hasAnswer}" aria-label="Show or hide the full passage">
       <p class="src-text">${highlight(p.x, answer)}</p></button>
-    ${isRel ? `<div class="src-foot"><span class="pill rel">${item.rel[docId] >= 2 ? "Highly relevant" : "Relevant"}</span></div>` : ""}
+    <div class="src-foot">
+      <span class="prob" title="Calibre's estimate that this passage is relevant"><span class="pbar"><i style="width:${Math.max(prob * 100, 2).toFixed(0)}%"></i></span>${pct(prob)} likely relevant</span>
+      ${isRel ? `<span class="pill rel">${item.rel[docId] >= 2 ? "Labelled highly relevant" : "Labelled relevant"}</span>` : ""}
+    </div>
   </div>`;
 }
 
 function replyHtml(msg) {
   const k = kb(), item = k.bank[msg.item];
-  const kCal = item.k_cal, kTop = item.k_top;
+  const kCal = item.k[state.target], kTop = item.k_top;
+  const tokCal = tokens(item, kCal), tokTop = tokens(item, kTop);
   const relCal = item.docs.slice(0, kCal).filter(d => item.rel[d] > 0).length;
   const relTop = item.docs.slice(0, kTop).filter(d => item.rel[d] > 0).length;
   let head = "", answerText = null;
@@ -88,9 +112,11 @@ function replyHtml(msg) {
     const a = findAnswer(item);
     answerText = a.pos >= 0 ? a.text : null;
     if (a.pos >= 0 && a.pos < kCal) {
-      head = `<p class="answer"><strong>${esc(a.text)}</strong></p><p class="answer-note">Found in ${kCal === 1 ? "the only passage" : `passage ${a.pos + 1} of the ${kCal}`} Calibre sent.</p>`;
+      head = `<p class="answer"><strong>${esc(a.text)}</strong></p><p class="answer-note">Found in ${kCal === 1 ? "the only passage" : `passage ${a.pos + 1} of the ${kCal}`} Calibre sent${a.pos >= kTop ? ". Top-5 would have missed it" : ""}.</p>`;
     } else if (a.pos >= 0 && a.pos < kTop) {
-      head = `<p class="answer"><strong>${esc(a.text)}</strong></p><p class="answer-note bad">Calibre missed this one: the answer was in passage ${a.pos + 1}, which only top-5 sent.</p>`;
+      head = `<p class="answer"><strong>${esc(a.text)}</strong></p><p class="answer-note bad">Calibre missed this one at a ${state.target}% target: the answer was in passage ${a.pos + 1}, which only top-5 sent.</p>`;
+    } else if (a.pos >= 0) {
+      head = `<p class="answer"><strong>${esc(a.text)}</strong></p><p class="answer-note bad">The answer was in passage ${a.pos + 1}, which neither top-5 nor Calibre at a ${state.target}% target sent.</p>`;
     } else {
       head = `<p class="answer">No answer in the retrieved passages.</p><p class="answer-note bad">Search didn't surface the right paragraph, so neither top-5 nor Calibre has it.</p>`;
     }
@@ -98,22 +124,27 @@ function replyHtml(msg) {
     head = `<p class="answer">No relevant passage was found.</p><p class="answer-note bad">Search didn't surface any passage labelled relevant, so neither top-5 nor Calibre has one.</p>`;
   } else {
     head = `<p class="answer"><strong>${plural(relCal, "relevant passage")}</strong> in Calibre's context</p>
-      <p class="answer-note ${relCal < relTop ? "bad" : ""}">Top-5 included ${relTop}${relCal < relTop ? ", so Calibre dropped one here" : ""}.</p>`;
+      <p class="answer-note ${relCal < relTop ? "bad" : ""}">Top-5 included ${relCal > relTop ? "only " : ""}${relTop}${relCal < relTop ? ", so Calibre dropped some here" : ""}.</p>`;
+  }
+  if (item.nothing) {
+    head += `<p class="flag"><strong>Calibre flagged this question:</strong> no passage looks relevant (best ${pct(Math.max(...item.p))}). An agent could search again or say it doesn't know.</p>`;
   }
 
-  const max = Math.max(item.tok_cal, item.tok_top, 1);
-  const diff = item.tok_top ? (item.tok_cal - item.tok_top) / item.tok_top * 100 : 0;
+  const max = Math.max(tokCal, tokTop, 1);
+  const diff = tokTop ? (tokCal - tokTop) / tokTop * 100 : 0;
   let saving;
   if (Math.abs(diff) < 0.5) saving = `<span class="saving">Same context as top-5</span>`;
   else if (diff < 0) saving = `<span class="saving">${Math.round(-diff)}% less context than top-5</span>`;
-  else saving = `<span class="saving ${relCal > relTop ? "" : "worse"}">${Math.round(diff)}% more context than top-5${relCal > relTop ? ", keeping more relevant passages" : ""}</span>`;
+  else saving = `<span class="saving ${relCal > relTop ? "more" : "worse"}">${Math.round(diff)}% more context than top-5${relCal > relTop ? ", keeping more relevant passages" : ""}</span>`;
 
   const meter = `<div class="meter">
-      <div class="meter-row cal"><span class="who">Calibre</span><span class="track"><span class="fill" data-w="${(item.tok_cal / max * 100).toFixed(1)}"></span></span><span class="what">${plural(kCal, "passage")}, ${fmt(item.tok_cal)} tokens</span></div>
-      <div class="meter-row top"><span class="who">Top-5</span><span class="track"><span class="fill" data-w="${(item.tok_top / max * 100).toFixed(1)}"></span></span><span class="what">${plural(kTop, "passage")}, ${fmt(item.tok_top)} tokens</span></div>
+      <div class="meter-row cal"><span class="who">Calibre</span><span class="track"><span class="fill" data-w="${(tokCal / max * 100).toFixed(1)}"></span></span><span class="what">${plural(kCal, "passage")}, ${fmt(tokCal)} tokens</span></div>
+      <div class="meter-row top"><span class="who">Top-5</span><span class="track"><span class="fill" data-w="${(tokTop / max * 100).toFixed(1)}"></span></span><span class="what">${plural(kTop, "passage")}, ${fmt(tokTop)} tokens</span></div>
     </div>${saving}`;
 
-  const sent = item.docs.slice(0, kCal).map((d, i) => sourceCard(item, d, i + 1, answerText, false)).join("");
+  const shown = msg.more ? kCal : Math.min(kCal, SHOW_FIRST);
+  const sent = item.docs.slice(0, shown).map((d, i) => sourceCard(item, d, i + 1, answerText, false)).join("")
+    + (kCal > SHOW_FIRST ? `<button type="button" class="linkish toggle-more" aria-expanded="${!!msg.more}">${msg.more ? "Show fewer" : `Show the other ${plural(kCal - SHOW_FIRST, "passage")} Calibre sent`}</button>` : "");
   const extras = item.docs.slice(kCal, kTop);
   const extraHtml = extras.length ? `
       <button type="button" class="linkish toggle-extra" aria-expanded="${msg.open}">${msg.open ? "Hide" : "Show"} the ${plural(extras.length, "passage")} only top-5 sends</button>
@@ -128,10 +159,10 @@ function replyHtml(msg) {
 function render() {
   const k = kb();
   $("ask").placeholder = k.placeholder;
-  $("fine").textContent = `Questions from the ${k.source} test set, with precomputed BM25 + embedding search. Answers come from the dataset's labels; no LLM is called.`;
+  $("fine").textContent = `Questions from the ${k.source} test set, with precomputed BM25 + embedding search. The recall target holds on average across questions, not on every one. Answers come from the dataset's labels; no LLM is called.`;
   const html = state.thread.map((m, idx) => {
     if (m.role === "welcome") {
-      return `<li class="welcome"><h1>Ask a question</h1><p>Calibre sends the LLM only the passages a question needs.</p>${chipsHtml(m.chips)}</li>`;
+      return `<li class="welcome"><h1>Ask a question</h1><p>Calibre sends the LLM only the passages a question needs: just enough to reach the recall target you pick.</p>${chipsHtml(m.chips)}</li>`;
     }
     if (m.role === "user") return `<li class="msg-user">${esc(m.text)}</li>`;
     if (m.role === "thinking") return `<li class="msg-bot"><div class="reply thinking">Searching<span></span><span></span><span></span></div></li>`;
@@ -148,6 +179,9 @@ function render() {
   $("thread").querySelectorAll("[data-ask]").forEach(b => b.addEventListener("click", () => ask(Number(b.dataset.ask))));
   $("thread").querySelectorAll(".toggle-extra").forEach(b => b.addEventListener("click", () => {
     const m = state.thread[Number(b.closest("[data-msg]").dataset.msg)]; m.open = !m.open; m.animated = true; render();
+  }));
+  $("thread").querySelectorAll(".toggle-more").forEach(b => b.addEventListener("click", () => {
+    const m = state.thread[Number(b.closest("[data-msg]").dataset.msg)]; m.more = !m.more; m.animated = true; render();
   }));
   $("thread").querySelectorAll(".src-expand").forEach(b => b.addEventListener("click", () => {
     const card = b.closest(".src"); const open = card.classList.toggle("open"); b.setAttribute("aria-expanded", open);
@@ -233,4 +267,5 @@ $("composer").addEventListener("submit", e => {
 });
 
 $("gh").href = DATA.github;
+renderTargets();
 switchKb(DATA.kbs[0].id);

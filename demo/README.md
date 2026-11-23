@@ -1,10 +1,13 @@
 # Calibre demo
 
-A chat-style demo that shows Calibre's effect on real test questions. Ask a question (or pick a suggested one) and the reply shows:
+A chat-style demo that shows Calibre's effect on real test questions. Pick a recall target (80%, 90% or 95%), ask a question (or pick a suggested one), and the reply shows:
 
 - the answer, and whether it was in the passages Calibre sent;
 - how much context Calibre sent compared with a fixed top-5 (passages and tokens);
-- the passages Calibre sent, with the ones the dataset labels as relevant marked, and the extra passages only top-5 would have sent.
+- the passages Calibre sent, each with Calibre's estimate that it's relevant and the dataset's own label, plus the extra passages only top-5 would have sent;
+- a flag when no passage looks relevant, where an agent could search again or abstain.
+
+Switching the target re-cuts every reply, so you can watch Calibre send more context for a stricter target.
 
 Knowledge bases: Wikipedia (SQuAD v1.1), science papers (BEIR SciFact) and nutrition research (BEIR NFCorpus).
 
@@ -29,8 +32,9 @@ python -m http.server 8000
 
 ## How it works
 
-- Retrieval is precomputed. For each test question, `data/demo_data.js` holds the ranked passages from `calibre_rag` v0 (BM25 + BGE-small-en-v1.5, tuned convex blend), how many passages top-5 and Calibre send, token counts, relevance labels and, for SQuAD, the answer key.
-- The blend weight and cutoff were tuned with `calibre_rag` on one half of each dataset's test questions; the demo only uses questions from the other half.
+- Retrieval is precomputed. For each test question, `data/demo_data.js` holds the ranked passages from `calibre_rag` (BM25 + BGE-small-en-v1.5, tuned convex blend) with each passage's P(relevant) (v1), how many passages Calibre sends for each recall target (v2) and top-5 sends, token counts, relevance labels and, for SQuAD, the answer key.
+- Half of each dataset's test questions are held out for the demo. The rest, pooled with the dataset's train questions, were used to tune the blend, train the calibrator (60%) and fit the recall guarantees (40%).
+- The recall target is a guarantee on average across questions, so some individual questions still miss (try "When did Mark Woods leave ABC?" at 90% and then 95%).
 - Typed questions are matched to the closest question in the test set. Questions outside it get a list of the closest ones available.
 - Answers come from the dataset's answer key. No LLM is called.
 - `scripts/export_from_pilot.py` generated the data file from the pilot study's retrieval runs. It's kept for provenance and needs those pilot artifacts, which aren't in this repo.

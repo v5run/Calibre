@@ -5,10 +5,13 @@ BM25 + BGE-small candidate lists from feasibility check D, the BEIR corpora and
 the SQuAD v1.1 dev set), which are not in this repo.
 
 For each knowledge base it:
-  1. tunes the blend weight and the score cutoff with calibre_rag on half of the
-     test questions (cutoff chosen to match top-5's recall with fewer passages),
-  2. runs calibre_rag v0 on the other half and stores, per question, the ranked
-     passages, how many top-5 and Calibre send, and the relevance labels.
+  1. holds out half of the test questions for the demo; nothing below sees them,
+  2. pools the dataset's train questions with the other half of the test questions,
+     tunes the blend weight on the pool, trains the v1 Calibrator on 60% of it and
+     fits v2 recall guarantees (80/90/95%) on the remaining 40%,
+  3. runs calibre_rag on the demo questions and stores, per question, the ranked
+     passages with P(relevant), how many passages each recall target and a fixed
+     top-5 send, token counts and the relevance labels.
 
 Usage: python demo/scripts/export_from_pilot.py PILOT_DIR demo/data/demo_data.js
 """
@@ -17,12 +20,16 @@ import json, random, re, sys
 import numpy as np
 
 from calibre_rag import Calibre, Hit
-from calibre_rag.cutoff import TopK, fit_score_threshold
-from calibre_rag.fusion import convex_combination, tune_alpha
+from calibre_rag.calibrate import Calibrator
+from calibre_rag.cutoff import TopK, fit_recall_guarantee
+from calibre_rag.fusion import tune_alpha
 
 PILOT, OUT = sys.argv[1], sys.argv[2]
 TOPN = 30            # each retriever's top-30 is fused
-KEEP = 10            # ranked passages stored per question
+DEPTH = 20           # candidates per question that get a probability
+TARGETS = (0.8, 0.9, 0.95)
+DEFAULT_TARGET = "90"
+NOTHING_BELOW = 0.1  # nothing_relevant flag: every passage below this probability
 SEED = 13
 BANK_MAX = 320       # questions per knowledge base
 KBS = [
@@ -64,7 +71,8 @@ for art in json.load(open(f"{PILOT}/../hubness/untrusted/squad/dev-v1.1.json"))[
         for qa in para["qas"]:
             squad_answers[qa["id"]] = [a["text"] for a in qa["answers"]]
 
-out = {"github": "https://github.com/v5run/Calibre", "topk": 5, "kbs": []}
+out = {"github": "https://github.com/v5run/Calibre", "topk": 5, "targets": [f"{round(t * 100)}" for t in TARGETS],
+       "default_target": DEFAULT_TARGET, "nothing_below": NOTHING_BELOW, "kbs": []}
 for kb in KBS:
     z = np.load(f"{PILOT}/cache/bge_{kb['id']}.npz")
     meta = json.load(open(f"{PILOT}/../hubness/data/{kb['id']}.json"))
@@ -80,46 +88,57 @@ for kb in KBS:
     test = [i for i, s in enumerate(z["src"]) if s == "test"]
     random.Random(SEED).shuffle(test)
     tune_q, eval_q = test[: len(test) // 2], test[len(test) // 2:]
+    pool = [i for i, s in enumerate(z["src"]) if s != "test"] + tune_q
+    random.Random(SEED + 1).shuffle(pool)
+    cut = int(0.6 * len(pool))
+    fit_q, calib_q = pool[:cut], pool[cut:]
 
-    # 1. tune on one half, with the library
-    L = {qi: lists_for(z, qi) for qi in test}
-    runs = {str(q): (L[q][0], L[q][1]) for q in tune_q}
-    qrels = {str(q): L[q][2] for q in tune_q}
+    # 1. tune, calibrate (v1) and fit guarantees (v2), never touching the demo questions
+    L = {qi: lists_for(z, qi) for qi in range(len(z["src"]))}
+    runs = {str(q): (L[q][0], L[q][1]) for q in pool}
+    qrels = {str(q): L[q][2] for q in pool}
     alpha, _ = tune_alpha(runs, qrels)
-    policy, _ = fit_score_threshold({q: convex_combination(*runs[q], alpha=alpha) for q in runs}, qrels, match_topk=5)
-    calibre = Calibre(alpha=alpha, cutoff=policy)
+    cal = Calibrator(alpha=alpha, depth=DEPTH).fit({str(q): runs[str(q)] for q in fit_q}, qrels)
+    calib_cands = cal.predict_runs({str(q): runs[str(q)] for q in calib_q})
+    policies = {f"{round(t * 100)}": fit_recall_guarantee(calib_cands, qrels, target=t) for t in TARGETS}
+    calibres = {k: Calibre(level="guaranteed", calibrator=cal, cutoff=pol, nothing_relevant_below=NOTHING_BELOW)
+                for k, pol in policies.items()}
     topk = TopK(out["topk"])
 
-    # 2. run v0 on the other half
-    bank, used = [], set()
+    # 2. run v1 + v2 on the demo questions
+    bank = []
     for qi in eval_q:
         text = str(z["qtext"][qi]).strip()
         if len(text) > 180:
             continue
         b, dn, rel, tok = L[qi]
-        res = calibre.retrieve(b, dn)
-        ranked = res.candidates[:KEEP]
-        k_top = topk.select(res.candidates)
-        rel_top20 = sum(1 for h in res.candidates if h.doc_id in rel)
+        res = {k: c.retrieve(b, dn) for k, c in calibres.items()}
+        cands = res[DEFAULT_TARGET].candidates
+        ks = {k: r.cutoff_k for k, r in res.items()}
+        k_top = topk.select(cands)
+        keep = max(max(ks.values()), k_top)
+        ranked = cands[:keep]
+        rel_top20 = sum(1 for h in cands if h.doc_id in rel)
         item = {
             "q": text,
             "docs": [h.doc_id for h in ranked],
-            "k_cal": res.cutoff_k, "k_top": k_top,
+            "p": [round(h.prob, 3) for h in ranked],
+            "tk": [tok[h.doc_id] for h in ranked],
+            "k": ks, "k_top": k_top,
+            "nothing": res[DEFAULT_TARGET].nothing_relevant,
             "rel": {d: g for d, g in rel.items() if d in {h.doc_id for h in ranked}},
             "rel_top20": rel_top20,
         }
         if kb["id"] == "squad":
             item["answers"] = squad_answers.get(str(z["qids"][qi]), [])
-        # tokens for the passages each method sends
-        item["tok_cal"] = sum(tok[h.doc_id] for h in res.candidates[: res.cutoff_k])
-        item["tok_top"] = sum(tok[h.doc_id] for h in res.candidates[:k_top])
-        # what the question demonstrates (used to pick suggestions)
-        cal_rel = sum(1 for h in res.candidates[: res.cutoff_k] if h.doc_id in rel)
-        top_rel = sum(1 for h in res.candidates[:k_top] if h.doc_id in rel)
-        item["kind"] = ("missed" if rel_top20 == 0 else "several" if rel_top20 >= 3
-                        else "trimmed" if cal_rel < top_rel else "clear")
+        # what the question demonstrates at the default target (used to pick suggestions)
+        k90 = ks[DEFAULT_TARGET]
+        cal_rel = sum(1 for d in item["docs"][:k90] if d in rel)
+        top_rel = sum(1 for d in item["docs"][:k_top] if d in rel)
+        item["kind"] = ("flagged" if rel_top20 == 0 and item["nothing"] else "missed" if rel_top20 == 0
+                        else "grew" if k90 > k_top and cal_rel > top_rel
+                        else "trimmed" if cal_rel < top_rel else "several" if rel_top20 >= 3 else "clear")
         bank.append(item)
-        used |= {h.doc_id for h in ranked}
 
     random.Random(SEED).shuffle(bank)
     bank = bank[:BANK_MAX]
@@ -138,12 +157,12 @@ for kb in KBS:
         passages[d] = {"t": title, "x": body}
 
     # suggestions: mostly clear wins, plus honest cases
-    want = {"clear": 4, "several": 2, "trimmed": 1, "missed": 1}
+    want = {"clear": 3, "several": 1, "grew": 1, "flagged": 1, "trimmed": 1, "missed": 1}
     sugg = []
     for kind, n in want.items():
         # skip questions that only make sense with their paragraph ("What is located within this district?")
         vague = re.compile(r"\b(this|these|those|he|she|they|it|his|her|their|its)\b", re.I)
-        ok = lambda it: (it["kind"] == kind and (kind != "clear" or it["k_cal"] <= 2)
+        ok = lambda it: (it["kind"] == kind and (kind != "clear" or it["k"][DEFAULT_TARGET] <= 2)
                          and not vague.search(it["q"]))
         pool = sorted([i for i, it in enumerate(bank) if ok(it)], key=lambda i: len(bank[i]["q"]))[: n * 3]
         random.Random(SEED + n).shuffle(pool)
@@ -151,10 +170,13 @@ for kb in KBS:
 
     out["kbs"].append({
         "id": kb["id"], "name": kb["name"], "source": kb["source"], "placeholder": kb["placeholder"],
-        "alpha": alpha, "tau": round(policy.tau, 4), "bank": bank, "passages": passages, "suggested": sugg,
+        "alpha": alpha, "bank": bank, "passages": passages, "suggested": sugg,
+        "calibration": {k: {"threshold": round(p.threshold, 4), "n": p.report["n_calibration_queries"]}
+                        for k, p in policies.items()},
     })
     kinds = {k: sum(1 for it in bank if it["kind"] == k) for k in want}
-    print(kb["id"], "alpha", alpha, "tau", round(policy.tau, 3), "bank", len(bank), kinds, "passages", len(passages))
+    mean_k = {k: round(sum(it["k"][k] for it in bank) / len(bank), 2) for k in policies}
+    print(kb["id"], "alpha", alpha, "bank", len(bank), kinds, "passages", len(passages), "mean k", mean_k)
 
 payload = json.dumps(out, separators=(",", ":"), ensure_ascii=False)
 with open(OUT, "w", encoding="utf-8") as fh:
