@@ -1,23 +1,29 @@
-"""The Calibre entry point. One class; versions are feature levels."""
+"""The Calibre entry point. One class; versions are feature levels.
+
+    level="baseline"    v0  tuned blend + top-k / score cutoff
+    level="calibrated"  v1  + P(relevant) per passage, probability cutoff, nothing_relevant flag
+    level="guaranteed"  v2  + cutoff with a recall guarantee (fit_recall_guarantee)
+    level="portable"    v3  planned
+"""
 from __future__ import annotations
 
 from typing import Optional, Sequence
 
-from .cutoff.policies import CutoffPolicy, TopK
+from .calibrate import Calibrator
+from .cutoff.policies import CutoffPolicy, ProbabilityThreshold, RecallGuarantee, TopK
 from .fusion.blend import convex_combination
 from .types import Hit, Result
 
 LEVELS = ("baseline", "calibrated", "guaranteed", "portable")
-_IMPLEMENTED = {"baseline"}
+_IMPLEMENTED = {"baseline", "calibrated", "guaranteed"}
 
 
 class Calibre:
     """Hybrid retrieval layer between your retrievers and the LLM.
 
-    Example (v0):
-        cal = Calibre(alpha=0.6, cutoff=ScoreThreshold(tau=0.72))
-        res = cal.retrieve(bm25_hits, dense_hits)
-        res.hits, res.cutoff_k
+    v0:  Calibre(alpha=0.6, cutoff=ScoreThreshold(tau=0.72))
+    v1:  Calibre(level="calibrated", calibrator=cal, cutoff=ProbabilityThreshold(0.25))
+    v2:  Calibre(level="guaranteed", calibrator=cal, cutoff=fit_recall_guarantee(...))
     """
 
     def __init__(
@@ -27,6 +33,8 @@ class Calibre:
         normalizer: str = "minmax",
         cutoff: Optional[CutoffPolicy] = None,
         depth: int = 20,
+        calibrator: Optional[Calibrator] = None,
+        nothing_relevant_below: float = 0.1,
     ):
         if level not in LEVELS:
             raise ValueError(f"level must be one of {LEVELS}")
@@ -35,20 +43,37 @@ class Calibre:
                 f"level='{level}' is planned but not implemented yet "
                 f"(implemented: {sorted(_IMPLEMENTED)}). See the roadmap in README.md."
             )
+        if level in ("calibrated", "guaranteed"):
+            if calibrator is None or calibrator.model_ is None:
+                raise ValueError(f"level='{level}' needs a fitted Calibrator (calibrator=Calibrator(...).fit(...))")
+            alpha, normalizer, depth = calibrator.alpha, calibrator.normalizer, calibrator.depth
+        if level == "guaranteed" and not isinstance(cutoff, RecallGuarantee):
+            raise ValueError("level='guaranteed' needs cutoff=fit_recall_guarantee(...)")
         self.level = level
         self.alpha = alpha
         self.normalizer = normalizer
-        self.cutoff = cutoff or TopK(5)
         self.depth = depth
+        self.calibrator = calibrator
+        self.nothing_relevant_below = nothing_relevant_below
+        default = ProbabilityThreshold(0.25) if level == "calibrated" else TopK(5)
+        self.cutoff = cutoff or default
 
-    def retrieve(self, bm25_hits: Sequence[Hit], dense_hits: Sequence[Hit]) -> Result:
-        fused = convex_combination(bm25_hits, dense_hits, self.alpha, self.normalizer)[: self.depth]
-        k = self.cutoff.select(fused)
-        return Result(
-            hits=fused[:k],
+    def retrieve(self, bm25_hits: Sequence[Hit], dense_hits: Sequence[Hit], query: Optional[str] = None) -> Result:
+        if self.calibrator is not None:
+            cands = self.calibrator.predict(bm25_hits, dense_hits, query)
+        else:
+            cands = convex_combination(bm25_hits, dense_hits, self.alpha, self.normalizer)[: self.depth]
+        k = self.cutoff.select(cands)
+        res = Result(
+            hits=cands[:k],
             cutoff_k=k,
             level=self.level,
-            candidates=fused,
+            candidates=cands,
             diagnostics={"alpha": self.alpha, "normalizer": self.normalizer,
-                         "cutoff": type(self.cutoff).__name__, "n_candidates": len(fused)},
+                         "cutoff": type(self.cutoff).__name__, "n_candidates": len(cands)},
         )
+        if self.calibrator is not None and cands:
+            probs = [h.prob for h in cands]
+            res.expected_relevant = float(sum(probs))
+            res.nothing_relevant = max(probs) < self.nothing_relevant_below
+        return res

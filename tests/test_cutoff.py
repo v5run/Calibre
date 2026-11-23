@@ -25,9 +25,10 @@ def test_probability_threshold_requires_probs():
     assert ProbabilityThreshold(tau=0.5).select(hits([0.9, 0.8, 0.1], [0.9, 0.6, 0.1])) == 2
 
 
-def test_v2_policies_not_yet():
-    with pytest.raises(NotImplementedError):
+def test_expected_recall_needs_probs():
+    with pytest.raises(ValueError):
         ExpectedRecall().select(hits([0.9]))
+    assert ExpectedRecall(rho=0.5).select(hits([0.9, 0.8, 0.1], [0.6, 0.3, 0.1])) == 1
 
 
 def test_fit_score_threshold_matches_topk_recall_with_fewer_passages():

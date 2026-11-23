@@ -17,8 +17,8 @@ Each version adds one capability, ships on its own, and supports one claim.
 | Version | Level | Adds | Status |
 |---|---|---|---|
 | v0 | `baseline` | Tuned fixed blend, raw-score cutoff, top-k fallback | **Implemented** |
-| v1 | `calibrated` | P(relevant) per passage, probability cutoff, `nothing_relevant` flag | Planned |
-| v2 | `guaranteed` | Recall guarantee on the cutoff (expected recall / conformal) | Planned |
+| v1 | `calibrated` | P(relevant) per passage, probability cutoff, `nothing_relevant` flag | **Implemented** |
+| v2 | `guaranteed` | Recall guarantee on the cutoff (expected recall / conformal risk control) | **Implemented** |
 | v3 | `portable` | Guarantees that survive dataset / embedding-model changes | Planned (research core) |
 | v4 | agentic | Search tool for agents (smolagents / MCP) | Planned |
 
@@ -30,7 +30,7 @@ Each version has a folder in [`experiments/`](experiments/) with its hypothesis,
 
 Open `demo/index.html` in a browser to run it locally. It's a static site, so it deploys on Vercel with the root directory set to `demo` (see [`demo/README.md`](demo/README.md)).
 
-## Quickstart (v0)
+## Quickstart
 
 ### 1. Install (Windows PowerShell)
 
@@ -90,6 +90,24 @@ fused = {q: convex_combination(*train_runs[q], alpha=alpha) for q in train_runs}
 policy, report = fit_score_threshold(fused, train_qrels, match_topk=5)   # fewest passages at top-5 recall
 ```
 
+### 6. Calibrate and guarantee recall (v1, v2)
+
+```python
+from calibre_rag import Calibre
+from calibre_rag.calibrate import Calibrator
+from calibre_rag.cutoff import fit_recall_guarantee
+
+cal = Calibrator(alpha=alpha).fit(train_runs, train_qrels)                 # v1: P(relevant) per passage
+policy = fit_recall_guarantee(cal.predict_runs(calib_runs), calib_qrels,   # v2: on queries the
+                              target=0.9)                                  # calibrator never saw
+
+calibre = Calibre(level="guaranteed", calibrator=cal, cutoff=policy)
+res = calibre.retrieve(bm25, dense)
+res.doc_ids, res.expected_relevant, res.nothing_relevant
+```
+
+`fit_recall_guarantee` promises **E[recall] ≥ target** on new queries from the same distribution as the calibration queries. Pass `delta=0.1` for the stricter version (recall ≥ target with 90% confidence), which sends more passages. Run `python examples/try_guarantee.py` for a self-contained example.
+
 ## Layout
 
 ```
@@ -97,13 +115,14 @@ calibre_rag/
   core.py        # Calibre entry point (versions = levels)
   types.py       # Hit, ScoredHit, Result
   fusion/        # v0: normalisation, convex combination, RRF, alpha tuning
-  cutoff/        # v0: top-k, score threshold (+ fitting); v1–v2 policies stubbed
-  calibrate/     # v1: calibrator (planned)
+  cutoff/        # v0: top-k, score threshold; v1: probability threshold; v2: expected recall, recall guarantee (CRC)
+  calibrate/     # v1: features, logistic / isotonic calibrator, Platt recalibration, ECE
   shift/         # v3: shift-robust calibration and guarantees (planned)
   adapters/      # LangChain, LlamaIndex, Weaviate, Qdrant, smolagents/MCP (planned)
   eval/          # nDCG@k, recall@k, selection recall
 examples/
   try_calibre.py # quick v0 demo
+  try_guarantee.py # v1 + v2 on synthetic data
 demo/            # chat-style web demo (static site)
 docs/figures/     # pilot figures used in this README
 experiments/
@@ -123,7 +142,7 @@ Before building this repo, a small pilot tested the core idea on five public ret
 
 The cutoff threshold was tuned on training queries to match top-5's recall, then measured on held-out test queries (BGE-small; negative = fewer passages):
 
-| Dataset | Raw-score cutoff (v0, implemented) | Calibrated cutoff (v1, planned) |
+| Dataset | Raw-score cutoff (v0) | Calibrated cutoff (v1) |
 |---|---|---|
 | SciFact | −28% | −34% |
 | NFCorpus | −20% | −21% |
@@ -144,15 +163,26 @@ The cutoff threshold was tuned on training queries to match top-5's recall, then
 
 </details>
 
+### Recall guarantee (v2)
+
+Run in this repo ([`experiments/v2_guaranteed/`](experiments/v2_guaranteed/)): calibrator trained on 40% of queries, cutoff fitted on 30%, measured on the other 30%, over 20 random splits (BGE-small + BM25).
+
+![Realised recall vs target, and passages sent](docs/figures/v2_guarantee_validity.png)
+
+- **The guarantee holds:** mean realised recall was 0.80–0.81, 0.90–0.91 and 0.95–0.96 for targets of 80%, 90% and 95% on SQuAD, SciFact and NFCorpus.
+- **It sends fewer passages where top-5 is wasteful:** 95% recall with 3.1 passages on SQuAD (top-5: 0.96 with 5), and 91% with 4.0 on SciFact (top-5: 0.89 with 5).
+- **It sends more where top-5 misses:** on NFCorpus top-5 finds about half the relevant passages; 90% recall takes ~14.
+- The guarantee is on average over calibration draws; individual splits landed up to 0.07 under. The `delta` option fixes that at the cost of more passages.
+
 ### Other findings
 
 - **Fusion:** a tuned fixed blend (v0's default) beat RRF on SciFact, NFCorpus and SQuAD (up to +0.04 nDCG@10 on SQuAD) and was within ±0.015 on NPL and CISI.
-- **Calibration** (v1): ECE ≈ 0.04 on held-out queries from the same dataset, vs ≈ 0.23 for raw fused scores, at ~0.13 ms per query.
+- **Calibration** (v1): ECE ≈ 0.04 on held-out queries from the same dataset in the pilot (0.005–0.014 with the repo's calibrator and larger splits), vs ≈ 0.23 for raw fused scores, at ~0.13 ms per query.
 - **Guarantees across datasets** (v3): a 90% recall guarantee held in-domain but landed anywhere from 38% to 100% on a dataset the calibrator hadn't seen; 25–50 labelled queries repaired most of the calibration. This is the main open research question.
 - **Not tested yet:** stronger embedders, SPLADE, rerankers, larger corpora, and real LLM answers.
 
 ## Development
 
-- Python ≥ 3.10; runtime dependency is NumPy only (scikit-learn arrives with v1).
+- Python ≥ 3.10; runtime dependency is NumPy only (the v1 calibrator is plain NumPy).
 - Experiment artifacts (`data/`, `cache/`, `runs/`, `*.pkl`) are git-ignored and regenerated by scripts.
 - Tag each version on release (`v0.1`, `v1.0`, …).

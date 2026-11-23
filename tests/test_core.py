@@ -17,9 +17,11 @@ def test_threshold_cutoff():
     assert 1 <= res.cutoff_k < 4
 
 
-def test_unimplemented_levels():
-    for level in ("calibrated", "guaranteed", "portable"):
-        with pytest.raises(NotImplementedError):
+def test_level_validation():
+    with pytest.raises(NotImplementedError):
+        Calibre(level="portable")
+    for level in ("calibrated", "guaranteed"):
+        with pytest.raises(ValueError):            # need a fitted Calibrator
             Calibre(level=level)
     with pytest.raises(ValueError):
         Calibre(level="nope")
