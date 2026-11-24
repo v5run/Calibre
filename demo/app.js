@@ -11,7 +11,13 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;",
 const fmt = n => Math.round(n).toLocaleString("en-US");
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
-const state = { kb: null, target: DATA.default_target, thread: [], matchIdx: -1, matches: [] };
+const state = { kb: null, target: DATA.default_target, mode: "same", thread: [], matchIdx: -1, matches: [] };
+const MODE_LABEL = { same: "This dataset", other: "Other datasets", fewshot: `+ ${DATA.few_shot} labels` };
+const MODE_NOTE = {
+  same: "Calibrated on labelled questions from this dataset.",
+  other: "Calibrated only on other datasets, with no labels from this one (v3).",
+  fewshot: `Calibrated on other datasets plus ${DATA.few_shot} labelled questions from this one (v3).`,
+};
 const kb = () => DATA.kbs.find(k => k.id === state.kb);
 const tokens = (item, n) => item.tk.slice(0, n).reduce((a, b) => a + b, 0);
 const pct = p => (p < 0.01 ? "<1%" : `${Math.round(p * 100)}%`);
@@ -35,6 +41,7 @@ function search(query, n = 6) {
 /* ---------- answer lookup (SQuAD) ---------- */
 function findAnswer(item) {
   if (!item.answers) return null;
+  if (item.ans !== undefined) return { pos: item.ans, text: item.ans >= 0 ? item.ans_text : item.answers[0] || "" };
   const k = kb();
   for (let p = 0; p < item.docs.length; p++) {
     const text = (k.passages[item.docs[p]].x || "").toLowerCase();
@@ -63,6 +70,28 @@ function renderTargets() {
   $("targets").querySelectorAll("button").forEach(b => b.addEventListener("click", () => setTarget(b.dataset.t)));
 }
 
+function renderModes() {
+  $("modes").innerHTML = DATA.modes.map(m =>
+    `<button type="button" data-m="${m}" aria-pressed="${m === state.mode}" title="${esc(MODE_NOTE[m])}">${esc(MODE_LABEL[m])}</button>`).join("");
+  $("modes").querySelectorAll("button").forEach(b => b.addEventListener("click", () => setMode(b.dataset.m)));
+}
+
+function setMode(m) {
+  if (m === state.mode) return;
+  state.mode = m;
+  const lastBot = [...state.thread].reverse().find(x => x.role === "bot");
+  if (lastBot) lastBot.animated = false;
+  renderModes(); render();
+}
+
+function renderSummary() {
+  const sm = kb().summary, cur = sm[state.mode][state.target], top = sm.top5;
+  const hit = cur.recall >= Number(state.target) / 100 - 0.005;
+  $("summary").innerHTML = `${esc(MODE_NOTE[state.mode])} Across ${cur.n} test questions, Calibre reaches
+    <strong class="${hit ? "" : "short"}">${Math.round(cur.recall * 100)}% recall</strong> (target ${state.target}%) with
+    <strong>${cur.k.toFixed(1)} passages</strong> on average. Top-5 reaches ${Math.round(top.recall * 100)}% with 5.`;
+}
+
 function setTarget(t) {
   if (t === state.target) return;
   state.target = t;
@@ -85,7 +114,7 @@ function pickSuggestions(n, exclude = new Set()) {
 
 function sourceCard(item, docId, rank, answer, extra) {
   const p = kb().passages[docId];
-  const prob = item.p[rank - 1];
+  const prob = item.p[state.mode][rank - 1];
   const isRel = item.rel[docId] > 0;
   const hasAnswer = answer && p.x.toLowerCase().includes(answer.toLowerCase());
   const tag = extra ? `Top-5 only, rank ${rank}` : rank > item.k_top ? `Rank ${rank}, beyond top-5` : `Rank ${rank}`;
@@ -102,7 +131,7 @@ function sourceCard(item, docId, rank, answer, extra) {
 
 function replyHtml(msg) {
   const k = kb(), item = k.bank[msg.item];
-  const kCal = item.k[state.target], kTop = item.k_top;
+  const kCal = item.k[state.mode][state.target], kTop = item.k_top;
   const tokCal = tokens(item, kCal), tokTop = tokens(item, kTop);
   const relCal = item.docs.slice(0, kCal).filter(d => item.rel[d] > 0).length;
   const relTop = item.docs.slice(0, kTop).filter(d => item.rel[d] > 0).length;
@@ -126,8 +155,8 @@ function replyHtml(msg) {
     head = `<p class="answer"><strong>${plural(relCal, "relevant passage")}</strong> in Calibre's context</p>
       <p class="answer-note ${relCal < relTop ? "bad" : ""}">Top-5 included ${relCal > relTop ? "only " : ""}${relTop}${relCal < relTop ? ", so Calibre dropped some here" : ""}.</p>`;
   }
-  if (item.nothing) {
-    head += `<p class="flag"><strong>Calibre flagged this question:</strong> no passage looks relevant (best ${pct(Math.max(...item.p))}). An agent could search again or say it doesn't know.</p>`;
+  if (item.nothing[state.mode]) {
+    head += `<p class="flag"><strong>Calibre flagged this question:</strong> no passage looks relevant (best ${pct(Math.max(...item.p[state.mode]))}). An agent could search again or say it doesn't know.</p>`;
   }
 
   const max = Math.max(tokCal, tokTop, 1);
@@ -159,6 +188,7 @@ function replyHtml(msg) {
 function render() {
   const k = kb();
   $("ask").placeholder = k.placeholder;
+  renderSummary();
   $("fine").textContent = `Questions from the ${k.source} test set, with precomputed BM25 + embedding search. The recall target holds on average across questions, not on every one. Answers come from the dataset's labels; no LLM is called.`;
   const html = state.thread.map((m, idx) => {
     if (m.role === "welcome") {
@@ -268,4 +298,5 @@ $("composer").addEventListener("submit", e => {
 
 $("gh").href = DATA.github;
 renderTargets();
+renderModes();
 switchKb(DATA.kbs[0].id);
