@@ -18,9 +18,7 @@ def test_threshold_cutoff():
 
 
 def test_level_validation():
-    with pytest.raises(NotImplementedError):
-        Calibre(level="portable")
-    for level in ("calibrated", "guaranteed"):
+    for level in ("calibrated", "guaranteed", "portable"):
         with pytest.raises(ValueError):            # need a fitted Calibrator
             Calibre(level=level)
     with pytest.raises(ValueError):

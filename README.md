@@ -19,14 +19,14 @@ Each version adds one capability, ships on its own, and supports one claim.
 | v0 | `baseline` | Tuned fixed blend, raw-score cutoff, top-k fallback | **Implemented** |
 | v1 | `calibrated` | P(relevant) per passage, probability cutoff, `nothing_relevant` flag | **Implemented** |
 | v2 | `guaranteed` | Recall guarantee on the cutoff (expected recall / conformal risk control) | **Implemented** |
-| v3 | `portable` | Guarantees that survive dataset / embedding-model changes | Planned (research core) |
+| v3 | `portable` | Calibration and guarantees after a dataset / embedding-model change | **Implemented** (research core) |
 | v4 | agentic | Search tool for agents (smolagents / MCP) | Planned |
 
 Each version has a folder in [`experiments/`](experiments/) with its hypothesis, plan and results.
 
 ## Demo
 
-[`demo/`](demo/) is a chat-style demo on real test questions (Wikipedia, science papers, nutrition research). Each reply shows the answer, how much context Calibre sent compared with a fixed top-5, and the passages it used.
+[`demo/`](demo/) is a chat-style demo on real test questions (Wikipedia, science papers, nutrition research). Each reply shows the answer, how much context Calibre sent compared with a fixed top-5, and the passages it used. Switches set the recall target and what Calibre was calibrated on (this dataset, other datasets only, or other datasets plus 50 labels).
 
 Open `demo/index.html` in a browser to run it locally. It's a static site, so it deploys on Vercel with the root directory set to `demo` (see [`demo/README.md`](demo/README.md)).
 
@@ -108,6 +108,27 @@ res.doc_ids, res.expected_relevant, res.nothing_relevant
 
 `fit_recall_guarantee` promises **E[recall] ≥ target** on new queries from the same distribution as the calibration queries. Pass `delta=0.1` for the stricter version (recall ≥ target with 90% confidence), which sends more passages. Run `python examples/try_guarantee.py` for a self-contained example.
 
+### 7. Move to a new dataset or embedding model (v3)
+
+```python
+from calibre_rag.shift import PortableCalibrator, fit_worst_source_guarantee
+
+pc = PortableCalibrator(alpha=alpha).fit({"scifact": (train_a, qrels), "nfcorpus": (train_b, qrels)})
+
+# No labels on the new data: worst-source cutoff, fitted on held-out source queries
+cands = {}
+for name, runs in {"scifact": calib_a, "nfcorpus": calib_b}.items():
+    pc.use(name); cands[name] = pc.predict_runs(runs)
+policy = fit_worst_source_guarantee(cands, qrels, target=0.9)
+pc.adapt(new_unlabelled_runs)          # standardise features on the new collection, no labels
+
+# Once ~50 questions on the new data are labelled: recalibrate and refit the guarantee on them
+pc.recalibrate(few_runs, few_qrels)
+policy = fit_recall_guarantee(pc.predict_runs(few_runs), few_qrels, target=0.9)
+
+calibre = Calibre(level="portable", calibrator=pc, cutoff=policy)
+```
+
 ## Layout
 
 ```
@@ -117,7 +138,7 @@ calibre_rag/
   fusion/        # v0: normalisation, convex combination, RRF, alpha tuning
   cutoff/        # v0: top-k, score threshold; v1: probability threshold; v2: expected recall, recall guarantee (CRC)
   calibrate/     # v1: features, logistic / isotonic calibrator, Platt recalibration, ECE
-  shift/         # v3: shift-robust calibration and guarantees (planned)
+  shift/         # v3: PortableCalibrator, weighted / worst-source guarantees
   adapters/      # LangChain, LlamaIndex, Weaviate, Qdrant, smolagents/MCP (planned)
   eval/          # nDCG@k, recall@k, selection recall
 examples/
@@ -174,11 +195,21 @@ Run in this repo ([`experiments/v2_guaranteed/`](experiments/v2_guaranteed/)): c
 - **It sends more where top-5 misses:** on NFCorpus top-5 finds about half the relevant passages; 90% recall takes ~14.
 - The guarantee is on average over calibration draws; individual splits landed up to 0.07 under. The `delta` option fixes that at the cost of more passages.
 
+### After a dataset or model change (v3)
+
+Run in this repo ([`experiments/v3_portable/`](experiments/v3_portable/)): calibrate on other collections, deploy on a new one (or on a new embedding model, BGE → MiniLM), 90% recall target, 10 splits.
+
+![Recall and passages after a shift](docs/figures/v3_shift.png)
+
+- **Naive transfer is unpredictable:** a "90%" cutoff realised 39%–98% recall, under-delivering badly on NFCorpus.
+- **With no labels, only the worst-source cutoff met the target in all six shifts** (0.905–0.991), at ~14–16 passages per question. Safe, but costly.
+- **50 labelled questions restore it at near in-domain cost:** few-shot CRC averaged 0.89–0.92 recall in every shift, with 1.0–2.7× the passages of a cutoff fitted on ~500 in-domain labels. Single runs vary more (worst split 0.79–0.86).
+
 ### Other findings
 
 - **Fusion:** a tuned fixed blend (v0's default) beat RRF on SciFact, NFCorpus and SQuAD (up to +0.04 nDCG@10 on SQuAD) and was within ±0.015 on NPL and CISI.
 - **Calibration** (v1): ECE ≈ 0.04 on held-out queries from the same dataset in the pilot (0.005–0.014 with the repo's calibrator and larger splits), vs ≈ 0.23 for raw fused scores, at ~0.13 ms per query.
-- **Guarantees across datasets** (v3): a 90% recall guarantee held in-domain but landed anywhere from 38% to 100% on a dataset the calibrator hadn't seen; 25–50 labelled queries repaired most of the calibration. This is the main open research question.
+- **Guarantees across datasets** (v3, pilot): a 90% recall guarantee held in-domain but landed anywhere from 38% to 100% on a dataset the calibrator hadn't seen. The repo's v3 experiment above reproduces this and measures the fixes.
 - **Not tested yet:** stronger embedders, SPLADE, rerankers, larger corpora, and real LLM answers.
 
 ## Development

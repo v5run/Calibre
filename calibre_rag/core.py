@@ -3,19 +3,20 @@
     level="baseline"    v0  tuned blend + top-k / score cutoff
     level="calibrated"  v1  + P(relevant) per passage, probability cutoff, nothing_relevant flag
     level="guaranteed"  v2  + cutoff with a recall guarantee (fit_recall_guarantee)
-    level="portable"    v3  planned
+    level="portable"    v3  + calibrator that moves to a new dataset / embedding model (calibre_rag.shift)
 """
 from __future__ import annotations
 
 from typing import Optional, Sequence
 
 from .calibrate import Calibrator
+from .shift import PortableCalibrator
 from .cutoff.policies import CutoffPolicy, ProbabilityThreshold, RecallGuarantee, TopK
 from .fusion.blend import convex_combination
 from .types import Hit, Result
 
 LEVELS = ("baseline", "calibrated", "guaranteed", "portable")
-_IMPLEMENTED = {"baseline", "calibrated", "guaranteed"}
+_IMPLEMENTED = {"baseline", "calibrated", "guaranteed", "portable"}
 
 
 class Calibre:
@@ -24,6 +25,8 @@ class Calibre:
     v0:  Calibre(alpha=0.6, cutoff=ScoreThreshold(tau=0.72))
     v1:  Calibre(level="calibrated", calibrator=cal, cutoff=ProbabilityThreshold(0.25))
     v2:  Calibre(level="guaranteed", calibrator=cal, cutoff=fit_recall_guarantee(...))
+    v3:  Calibre(level="portable", calibrator=PortableCalibrator(...).fit(sources).adapt(new_runs),
+                 cutoff=fit_worst_source_guarantee(...) or fit_recall_guarantee(<few labelled target queries>))
     """
 
     def __init__(
@@ -33,7 +36,7 @@ class Calibre:
         normalizer: str = "minmax",
         cutoff: Optional[CutoffPolicy] = None,
         depth: int = 20,
-        calibrator: Optional[Calibrator] = None,
+        calibrator: Optional[Calibrator | PortableCalibrator] = None,
         nothing_relevant_below: float = 0.1,
     ):
         if level not in LEVELS:
@@ -43,9 +46,12 @@ class Calibre:
                 f"level='{level}' is planned but not implemented yet "
                 f"(implemented: {sorted(_IMPLEMENTED)}). See the roadmap in README.md."
             )
-        if level in ("calibrated", "guaranteed"):
+        if level in ("calibrated", "guaranteed", "portable"):
             if calibrator is None or calibrator.model_ is None:
                 raise ValueError(f"level='{level}' needs a fitted Calibrator (calibrator=Calibrator(...).fit(...))")
+        if level == "portable" and (not isinstance(calibrator, PortableCalibrator) or calibrator.current is None):
+            raise ValueError("level='portable' needs PortableCalibrator(...).fit(sources).adapt(target_runs)")
+        if level in ("calibrated", "guaranteed", "portable"):
             alpha, normalizer, depth = calibrator.alpha, calibrator.normalizer, calibrator.depth
         if level == "guaranteed" and not isinstance(cutoff, RecallGuarantee):
             raise ValueError("level='guaranteed' needs cutoff=fit_recall_guarantee(...)")
